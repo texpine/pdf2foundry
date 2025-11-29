@@ -1,0 +1,246 @@
+
+----------------------
+Prompt 1: cleaning the .md
+----------------------
+
+You are a technical writer and web content manager charged to structure markdown .md files for the tool Obsidian. It's your job to structure it so Obsidian can make the best of it, and break down the content into more .md files interlinked with each other.
+
+== FILESYSTEM PATHS ==
+$root = In your list of Allowed Directories from the Filesystem extension, you can find folder NumeneraExportedMDs. We will work from this folder as root.
+$book = folder $root\Numenera-BreakTheHorizon
+$book.md = folder $root\Numenera-BreakTheHorizon\Numenera-BreakTheHorizon.md
+
+== CONTEXT ==
+a. We have a .md file that have the content of an entire book as a single markdown code.
+b. The markdown code has references to pictures in the same folder, but other that that its content is self-contained in that single .md file.
+c. The book is a tabletop RPG supplement from a game called Numenera, written by Monte Cook Games.
+d. We must preserve their written content without changing the text or hallucinating new content.
+e. We will stick strictly to data wrangling, organization, metadata, metadata enrichment, categorization and formatting.
+f. The instructions below are in multiple steps. Ask me anything that helps clarify the task ahead.
+
+== TASK ==
+We will be Correcting Links.
+1. Open $book.md. Read through the attached .md file and keep it in your context window.
+2. Analyze how this .md can be made better for Obsidian.
+3. Add metadata or re-organize the .md structure and markdown code for Obsidian. Do not change the author's written text.
+4. In the code, look for <span> HTML tags with ids as page numbers.
+- For example, we can find "<span id="page-10-0"></span>" in the code.
+5 Transform all <span> into a h6 markdown heading with ###### and the id text.
+- example, "<span id="page-10-0"></span>" becomes "######page-10-0"  in the code.
+- example, "<span id="page-40-0"></span>" becomes "######page-40-0"  in the code.
+- example, "<span id="page-33-0"></span>" becomes "######page-33-0"  in the code.
+6 Look for internal wikilinks within the same .md file that refer to page anchors. We will fix the link, as the anchor tag they are referring expects an h1 anchor with only one # but they need to become an h6 anchor with six #.
+- example, "*Get a Map, [page 10](#page-11-0)*" becomes "*Get a Map, [page 10](######page-11-0)*".
+- example, "*Customization by Numenera Device, [page 32](#page-33-0)*" becomes "*Customization by Numenera Device, [page 32](######page-33-0)*".
+7. Look for external books references. Those are defined as a short sentences followed by a page number, WITHOUT markdown links.
+- Example: "Amber Gleaners, page 245"
+- Example: *Vehicular Movement, page 404*
+8. For those external references, create dummy wikilinks for future reference with the word "external".
+- Example: "Amber Gleaners, page 245" becomes "[Amber Gleaners](external)"
+- Example: "Vehicular Movement, page 404" becomes "[Vehicular Movement](external)"
+
+== OUTPUT ==
+- AS the code corrections happen, output a log once in a way with the count and type of changes being made. Don't be verbose I just want to follow overall.
+- Once all changes are made, save a copy of this file to folder $book with the prefix "_claude_" in the name of the file.
+
+
+
+
+
+---------------------
+Prompt 2: exporting items
+---------------------
+
+You are a web writer and content manager charged to create separate .md files for every item players can use in their characters from a tabletop RPG book. The goal is to have them as separate .md files so they can be individually consulted later.
+
+== FILESYSTEM PATHS ==
+$root = In your list of Allowed Directories from the Filesystem extension, you can find folder NumeneraExportedMDs. We will work from this folder as root.
+$book = folder $root/Numenera-BreakTheHorizon
+$book.md = folder $root/Numenera-BreakTheHorizon/_claude_Numenera-BreakTheHorizon.md
+$artifacts = folder $root/items/artifacts
+$cyphers = folder $root/items/cyphers
+$equipment = folder $root/items/equipment
+$vehicles = folder $root/items/vehicles
+
+== CONTEXT ==
+a. This book can be used by players to improve their characters
+b. Individual items are to be exported as different items for FoundryVTT, and having them as individual .md will help in the export process.
+c. Every time an item becomes an individual .md file, we need to link it in $book.md, to maintain the relationship in a wiki format.
+
+== TASK ==
+We will parse items for player characters in new separate .md files.
+
+= Phase 1 =
+Scan $book.file to find items of these types: Artifacts, Cyphers, Equipment and Vehicles.
+
+1 Artifacts are items that start with a title with its name as in followed in₮he text by fields Level, a Form, Effect and Depletion.
+- Example of Artifact: "#### **FLIGHT ARMOR** **Level:** 1d6 + 4 **Form:** Full suit of synth and steel armor, covering the entirety of the wearer's body; features a bulky flight machine attached to the suit's back **Effect:** <description of effect>. **Depletion:** 1 in 1d20 <additional description of depletion>"
+- Example of Artifact: "#### **JET GLOVES** **Level:** 1d6 + 1 **Form:** Bulky, gauntlet-like devices with a control surface on each **Effect:** <description of effect>. **Depletion:** 1 in 1d20"
+
+2 Cyphers are items that start with a title with its name as in followed in₮he text by fields Level, a Form and an Effect, they don't have Depletion like Artifacts.
+- Example of Cypher: "#### **GLOW SKATES** ** **Level:** 1d6 + 1 **Form:** Matched set of two bulky devices that can be strapped to user's feet like bulky boots **Effect:** <description of effect>"
+- Example of Cypher: "#### **INSTANT VEHICLE** **Level:** 1d6 + 1 **Form:** Fob-like handheld device **Effect:** <description of effect>"
+
+3 Equipment are items listed in tables with columns Equipment | Cost | Description, each row is an equipment. They only have the properties Name, Cost amd Description.
+- Example of Equipment in the markdown: "| Altimeter      | 15 shins | Disc-like device that indicates approximate height via a dial.                                                                                                                                                                                                                                                                                                                                         |"
+- Example of Equipment in the markdown: "| Medicinal             | 10 shins | A small bottle of 10 pills that provide pain relief and some defense against standard<br>diseases. Eases Might defense tasks against disease if taken within 28 hours of<br>exposure.                                                                                                                  |"
+
+4 Vehicles (which also includes Mounts) are items described in a main line followed by a paragraph. The main line is structured in the code as "**<name of vehicle or mount>**level <level number>(<level number*3>) <price>". The following paragraph or phrase is its Description. Vehicles have as characteristics Name, Level, Price and Description. Price is sometimes described in shins, sometimes more abstract with general ideas like "Exorbitant" or "Expensive".
+- Example of Vehicle in the markdown: "**Coaster** level 3 (9) Exorbitant<line break>Two-masted vessel not suited to long trips away from land, but able to carry several dozen people (minimum crew 10) and some cargo. Enables over water movement of a short distance each round in calm water or an average of 8 miles per hour (13 km/h) as long as the wind is right."
+- Example of Vehicle in the markdown: "**Rowboat** level 2 (6) 100 shins Carries up to six people on water (minimum crew 1). Moves up to a short distance each round in calm water or an average of 6 miles per hour (10 km/h)."
+
+
+= Phase 2 =
+For each item found, change the markdown code for the name to be a link a new .md file with the same name of the item, and to include a block reference we can use later for internal wikilinks.
+1 File name of this link is the name of the item replacing spaces for underlines, for example the artifact JET GLOVES becomes the file JET_GLOVES.
+-- From now on we will refer to this modified name as variable !item_filename
+
+2 The link has the structure [<item name>](<item path>/<!item_filename>.md)
+-- The item path depends on the type of the item:
+--- Artifacts use path $artifacts, like [<item name>](<$artifacts>/<!item_filename>.md)
+--- Cyphers use path $cyphers, like [<item name>](<$cyphers>/<!item_filename>.md)
+--- Equipment use path $equipment, like [<item name>](<$equipment>/<!item_filename>.md)
+--- Vehicles use path $vehicles, like [<item name>](<$vehicles>/<!item_filename>.md)
+
+We create a block reference for each item depending on the type of the item:
+
+3 Vehicles: in the line above the main line with the vehicle name and level, we create a block reference as a text in the format "^!item_filename" with an additional line break above it, to separated from the rest of the text.
+-- For example: "**Coaster** level 3 (9) Exorbitant<line break>Two-masted vessel [...rest of description]." becomes "<line break>^COASTER<line break>**Coaster** level 3 (9) Exorbitant<line break>Two-masted vessel [...rest of description]."
+-- For example: "**Rowboat** level 2 (6) 100 shins Carries up to six people [...rest of description]." becomes "<line break>^ROWBOAT<line break>**Rowboat** level 2 (6) 100 shins Carries up to six people [...rest of description]."
+
+- Artifacts and Cyphers: in the line above the markdown title, we create a block reference as a text in the format "^!item_filename" with an additional line break above it, to separated from the rest of the text.
+-- For example, artifact JET GLOVES would have its title "#### **JET GLOVES**" become "<line break>^JET_GLOVES<line break>#### **[JET GLOVES](<$artifacts>/JET_GLOVES.md)**" in the markdown code.
+-- For example, artifact FLIGHT ARMORS would have its title "#### **FLIGHT ARMOR**" become "<line break>^FLIGHT_ARMOR<line break>#### **[FLIGHT ARMOR](<$artifacts>/FLIGHT_ARMOR.md)**" in the markdown code.
+-- For example, cypher GLOW SKATES would have its title "#### **GLOW SKATES**" become "<line break>^GLOW_SKATES<line break>#### **[GLOW SKATES](<$cyphers>/GLOW_SKATES.md)**" in the markdown code.
+
+4 Equipment: as those items are always in a table, we can only create a block reference on top of the table that the item belongs, by using the section name as anchor as well, in a similar way than the items above.
+-- For example, the equipment "Vocal focus" is described in the table under the title "#### **SPECIAL EQUIPMENT FOR UNDERWATER TRAVEL**". Therefore, on top of the code for the entire table, we would create a single block reference like "^SPECIAL_EQUIPMENT_FOR_UNDERWATER_TRAVEL" and use this block reference in links for this item, for example, [Link to Vocal focus](Numenera-BreakTheHorizon.md#^SPECIAL_EQUIPMENT_FOR_UNDERWATER_TRAVEL).
+-- For example, the equipment "Dry storage, rental" is described in the table under the title "#### **EQUIPMENT FOR UNDERWATER TRAVEL**". Therefore, on top of the code for the entire table, we would create a single block reference like "^EQUIPMENT_FOR_UNDERWATER_TRAVEL" and use this block reference in links for this item, for example, [Link to Dry storage, rental](Numenera-BreakTheHorizon.md#^EQUIPMENT_FOR_UNDERWATER_TRAVEL).
+-- From now on, I'll refer to this block reference for equipments as !equipment_table
+
+= Phase 3 =
+On each item found, create its own .md file in the correct folder path depending on its type.
+1 The name of the file is <!item_filename>.md
+2 The folder path to save depends on the item type:
+-- Artifacts: Save all .md files at folder $artifacts
+-- Cyphers: Save all .md files at folder $cyphers
+-- Equipment: Save all .md files at folder $equipment
+-- Vehicles: Save all .md files at folder $vehicles
+
+The markdown code varies with the item type as well.
+3 For all .md files and pseudo-codes below, the field Source will link back to the original $book.md file.
+-- Example of Source link for an artifact called JET GLOVES: [Numenera-BreakTheHorizon](<path $book.md>#^JET_GLOVES)
+
+4 Artifacts have this pseudo-code:
+#### <item original name>
+##### Level
+<item level as per the text>
+##### Form
+<item form as per the text>
+##### Effect
+<description of effects as per the text>
+##### Depletion
+<item depletion as per the text>
+##### Source
+[<$book.md>](<$root.md path>#^<!item_filename>)
+
+5 Cyphers have this pseudo-code:
+#### <item original name>
+##### Level
+<item level as per the text>
+##### Form
+<item form as per the text>
+##### Effect
+<description of effects as per the text>
+##### Source
+[<$book.md>](<$root.md path>#^<!item_filename>)
+
+6 Vehicles have this pseudo-code:
+#### <item original name>
+##### Level
+<item level as per the text>
+##### Cost
+<item cost as per the text>
+##### Description
+<description of effects as per the text>
+##### Source
+[<$book.md>](<$root.md path>#^<!item_filename>)
+7 Equipment have this pseudo-code:
+#### <item original name>
+##### Cost
+<item cost as per the text>
+##### Description
+<description of effects as per the text>
+##### Source
+[<$book.md>](<$root.md path>#^<!equipment_table>)
+
+
+== OUTPUT ==
+1. Partial progress statuses when loading $book.md
+2. Partial progress statuses on each phase of the Task
+3. Save file $book.md with all the modifications made during Phase 2.
+4. On Phase 3, several new .md files will be saved at paths $artifacts, $cyphers, $equipment and $vehicles - one for each item found in each of these types.
+5. ASk any questions along the way if you need clarification in parts of this task.
+
+
+---------------------
+Prompt 3: exporting character options
+---------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+= Phase 2 =
+We will be splitting Chapters in extra .md files
+
+1. Analyze the .md again to define the boundaries of its Chapters, where they begin and where they end.
+
+2. Split the content of each Chapter into individual .md files, linking back into a main .md with the beginning of the book and the list of chapters, up to the moment the chapters actually start, by which moment we just link the new .mds here.
+- Chapters begin in new pages in the book, so their beginning is always after some <span> tag in the markdown code.
+-- Example: Chapter 8 starts after "<span id="page-79-0"></span>"
+-- Example: Chapter 9 starts after "<span id="page-111-0"></span>"
+- Some pages summarize or reference Chapters but are not the beginning of that content. Those start with "# PART".
+-- Example: the text chunk "# PART 3: WHERE THE SYNTH MEETS THE ROAD <span id="page-78-0"></span>![](_page_78_Picture_1.jpeg) Chapter 8: Encounters and Hazards Along the Way Chapter 9: Travel-themed GM Intrusions"  is not the beginning of Chapter 8
+- The exact pages in which the Chapters begin can be found in the table named "### TABLE OF CONTENTS", and you can use that as reference so find the correct <span> tag when the chapter starts, by adding +1 to the page reference.
+-- Example: in the ### TABLE OF CONTENTS, Chapter 8 starts at page 78, but in the markdown it starts after "<span id="page-79-0"></span>", +1 page compared to the table.
+-- Example: in the ### TABLE OF CONTENTS, Chapter 9 starts at page 110, but in the markdown it starts after "<span id="page-111-0"></span>", +1 page compared to the table.
+
+3. Split the Chapters in individual, additional .md files named with the name of the original .md plus the chapter number and title, linking the original .md to these new files assuming they will be saved in the same folder.
+- Example: when Chapter 1 is split, the file should be called <name of the original .md>_chapter_1.md, and the place where Chapter 1 was in the original .md should become wikilink "[Chapter 1: Why Travel?](<name of the original .md>_chapter_1.md)
+- Example: when Chapter 2 is split, the file should be called <name of the original .md>_chapter_2.md, and the place where Chapter 1 was in the original .md should become wikilink "[Chapter 2: Equipment for Travel](<name of the original .md>_chapter_2.md)
+- Example: when Chapter 1 is split, the file should be called <name of this .md>_chapter_1.md
+
+
+
+
+- Those are links to external books, .md files in other folders.
+
+[Custom foo description](#foo)
+
+# Foo
+
+Look for page references to other books. Those are defined as a short sentences followed by a page number, without markdown links.
+- For example "Amber Gleaners, page 245"  or *Vehicular Movement, page 404*
+- Those are links to external books, .md files in other folders.
+
+6. Eliminate all <span> tags from the code, including closing tags and parameters.
+- Example: <span id="page-33-0"></span> is deleted and replaced by a blank space
+- Example: <span id="page-106-0"></span> is deleted and replaced by a blank space
+- Example: <span id="page-11-0"></span> is deleted and replaced by a blank space
+- Example: <span id="page-29-0"></span> is deleted and replaced by a blank space
