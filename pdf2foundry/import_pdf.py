@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from typing import List, Optional
 
+# Mandatory dependencies
 import imagehash
 import ollama
 from PIL import Image
@@ -43,9 +44,9 @@ def run_marker_single(
         llm_model_name,
         "--ollama_base_url",
         llm_api_or_url,
-        "--paginate_output",
-        "--workers",
-        "4",
+        "--paginate_output"
+        # "--workers",
+        # "4",
     ]
 
     try:
@@ -72,7 +73,7 @@ def run_pdfimages_into_dir(
 
     If extraction fails or no images were created, returns an empty list.
     """
-    pdfimages_cmd = ["pdfimages", pdf_path, images_dir, "-png"]
+    pdfimages_cmd = ["pdfimages", "-png", pdf_path, images_dir]
     try:
         logger.info("Extracting images with pdfimages into %s...", images_dir)
         res = subprocess.run(pdfimages_cmd, capture_output=True, text=True, check=True)
@@ -85,7 +86,7 @@ def run_pdfimages_into_dir(
         return []
 
     # Collect any PNGs created using the provided prefix/directory
-    pattern = os.path.join(images_dir + "*")
+    pattern = os.path.join(images_dir, "*")
     created = [
         os.path.basename(p) for p in glob.glob(pattern) if p.lower().endswith(".png")
     ]
@@ -153,6 +154,7 @@ def find_matching_png(
 
     Returns the path to the matched PNG, or None if no match found.
     """
+    logger.info("Comparing JPEgs and PNGs" )
     # Compute source MD5 once
     try:
         src_md5 = md5_file(abs_candidate)
@@ -174,7 +176,7 @@ def find_matching_png(
         try:
             d = phash_distance(abs_candidate, p, logger)
             # threshold: accept small distances (tunable)
-            if d <= 5:
+            if d <= 50:
                 if logger:
                     logger.debug("phash match (dist=%s): %s ~= %s", d, abs_candidate, p)
                 return p
@@ -197,7 +199,7 @@ def rewrite_markdown_image_references(
     md_text: str,
     output_dir: str,
     images_dir: str,
-    png_paths: List[str],
+    # png_paths: List[str],
     logger: logging.Logger,
 ) -> str:
     """Process markdown image references: match with PNGs, move originals, update references.
@@ -218,10 +220,20 @@ def rewrite_markdown_image_references(
 
     def normalize_path(p):
         # Remove leading ./ or / and normalize separators
-        return p.lstrip("./\\")
+        return os.path.normpath(p).lstrip("./\\")
 
-    # Create images_replaced directory
-    images_replaced_dir = os.path.join(output_dir, "images_replaced")
+    # Get the directory where the markdown file is located (same as images_dir)
+    # md_dir = os.path.dirname(images_dir)
+    
+    # Build list of PNG paths
+    # Fallback: if pdfimages didn't create anything, look for any PNGs directly in md_dir
+    # if not image_files:
+    png_paths = [
+        os.path.join(images_dir, os.path.basename(p)) for p in glob.glob(os.path.join(images_dir, "*.png"))
+    ]
+    
+    # Create images_replaced directory in the same directory as the markdown file
+    images_replaced_dir = os.path.join(output_dir, "images_replaced/")
     os.makedirs(images_replaced_dir, exist_ok=True)
 
     # Process all image references
@@ -230,7 +242,11 @@ def rewrite_markdown_image_references(
     ):
         img_ref = match.group(1)
         norm = normalize_path(img_ref)
-        abs_candidate = os.path.join(output_dir, norm)
+        # Handle absolute paths properly
+        if os.path.isabs(norm):
+            abs_candidate = norm
+        else:
+            abs_candidate = os.path.join(output_dir, norm)
         if not os.path.exists(abs_candidate):
             continue
 
@@ -239,12 +255,12 @@ def rewrite_markdown_image_references(
 
         if matched_png:
             # Move original to images_replaced/ with "_replaced" suffix
-            png_basename_no_ext = os.path.splitext(os.path.basename(matched_png))[0]
+            # png_basename_no_ext = os.path.splitext(os.path.basename(matched_png))[0]
             orig_basename = os.path.basename(norm)
-            orig_ext = os.path.splitext(orig_basename)[1]
+            # orig_ext = os.path.splitext(orig_basename)[1]
 
-            renamed_file = f"{png_basename_no_ext}_replaced{orig_ext}"
-            dest_orig = os.path.join(images_replaced_dir, renamed_file)
+            # renamed_file = f"{png_basename_no_ext}_replaced{orig_ext}"
+            dest_orig = os.path.join(images_replaced_dir, orig_basename)
             try:
                 shutil.move(abs_candidate, dest_orig)
                 logger.info("Moved replaced image %s to %s", abs_candidate, dest_orig)
@@ -254,11 +270,15 @@ def rewrite_markdown_image_references(
                     abs_candidate,
                     e,
                 )
+                # Don't update markdown reference if move failed
+                continue
 
             # Update markdown reference to use the PNG
             png_basename = os.path.basename(matched_png)
             new_ref = os.path.join("images", png_basename).replace("\\", "/")
-            md_text = md_text.replace(img_ref, new_ref)
+            # Replace only the specific match to avoid affecting other references with same filename
+            start, end = match.span(1)
+            md_text = md_text[:start] + new_ref + md_text[end:]
             logger.info("Replaced image reference %s with %s", img_ref, new_ref)
         else:
             # No match found: keep original behavior (move into images/)
@@ -267,7 +287,9 @@ def rewrite_markdown_image_references(
             try:
                 shutil.move(abs_candidate, dest_path)
                 new_ref = os.path.join("images", dest_name).replace("\\", "/")
-                md_text = md_text.replace(img_ref, new_ref)
+                # Replace only the specific match to avoid affecting other references with same filename
+                start, end = match.span(1)
+                md_text = md_text[:start] + new_ref + md_text[end:]
                 logger.info("Moved unmatched image %s to images/", abs_candidate)
             except Exception as e:
                 logger.warning("Could not move image %s: %s", abs_candidate, e)
@@ -276,8 +298,8 @@ def rewrite_markdown_image_references(
 
 
 def convert_pdf_to_markdown(
-    pdf_path, output_dir, llm_service, llm_model_name, llm_api_or_url
-):
+    pdf_path: str, output_dir: str, llm_service: str, llm_model_name: str, llm_api_or_url: str
+) -> None:
     """
     Converts a PDF file to Markdown using Marker.
 
@@ -315,29 +337,23 @@ def convert_pdf_to_markdown(
         # Error already logged in helper
         return
 
-    # Prepare images directory
-    images_dir = os.path.join(output_dir, "images")
+    # Get the directory where the markdown file is located (same as the pdfimages prefix)
+    md_dir = os.path.dirname(output_filepath)
+    
+    # Prepare images directory in the same directory as the markdown file (inside the md file's directory)
+    images_dir = os.path.join(md_dir, "images/")
     os.makedirs(images_dir, exist_ok=True)
 
     # Extract images using helper; returns list of created PNG base names (or empty list)
     image_files = run_pdfimages_into_dir(pdf_path, images_dir, logger)
 
-    # Fallback: if pdfimages didn't create anything, look for any PNGs directly in output_dir
-    if not image_files:
-        image_files = [
-            os.path.basename(p) for p in glob.glob(os.path.join(output_dir, "*.png"))
-        ]
-
     # Load markdown
     with open(output_filepath, "r", encoding="utf-8") as f:
         md_text = f.read()
 
-    # Build list of PNG paths
-    png_paths = [os.path.join(images_dir, n) for n in image_files]
-
     # Rewrite image references using helper
     md_text = rewrite_markdown_image_references(
-        md_text, output_dir, images_dir, png_paths, logger
+        md_text, md_dir, images_dir, logger
     )
 
     # Save markdown
@@ -355,9 +371,22 @@ def convert_pdf_to_markdown(
 
 if __name__ == "__main__":
     convert_pdf_to_markdown(
-        "../pdf2foundry_input/Skull Wizards of the Chaos Caverns.pdf",
-        "../pdf2foundry_output/",
+        # "/root/pdf2foundry_input/Skull Wizards of the Chaos Caverns.pdf",
+        "/root/pdf2foundry_input/NumeneraDiscovery-Corebook.pdf",
+        "/root/pdf2foundry_output/",
         "marker.services.ollama.OllamaService",
         "gpt-oss:120b",
         "http://localhost:11434",
     )
+
+# Export public API
+__all__ = [
+    "run_marker_single",
+    "run_pdfimages_into_dir",
+    "md5_file",
+    "phash_distance",
+    "ollama_compare_images",
+    "find_matching_png",
+    "rewrite_markdown_image_references",
+    "convert_pdf_to_markdown",
+]
