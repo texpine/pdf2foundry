@@ -26,6 +26,8 @@ echo 'Ollama: downloading qwen3-coder:30b' &&
 ollama pull qwen3-coder:30b && # needs 4 A4000
 echo 'Ollama: downloading gpt-oss:20b' &&
 ollama pull gpt-oss:20b && # needs 2 A4000
+echo 'Ollama: downloading gpt-oss:120b' &&
+ollama pull gpt-oss:120b && # needs 4 A4000
 echo 'Ollama: downloading deepseek-r1:70b' &&
 ollama pull deepseek-r1:70b && # needs 4 A4000
 echo 'Ollama: downloading deepseek-r1:14b' &&
