@@ -1,28 +1,26 @@
 import base64
 import binascii
-import glob
 import hashlib
-import importlib
 import io
 import logging
 import os
 import platform
 import re
 import shutil
-import subprocess
 import sys
 from typing import List, Optional
-
 import fitz
 import imagehash
 import ollama
-import poppler
 from marker.config.parser import ConfigParser
 from marker.converters.pdf import PdfConverter
 from marker.models import create_model_dict
 from marker.output import text_from_rendered
 from PIL import Image
-
+import cv2
+import numpy as np
+import skimage
+from skimage.metrics import structural_similarity as ssim
 
 def is_debugging() -> bool:
     """Check if the script is running under a debugger.
@@ -303,8 +301,8 @@ def run_pdfimages_into_dir(
         doc.close()
         if created:
             logger.info("PyMuPDF extracted %d images", len(created))
-            return created
-        logger.debug("PyMuPDF found no images to extract")
+        else:
+            logger.debug("PyMuPDF found no images to extract")
     except Exception as e:
         logger.debug("PyMuPDF extraction failed or not available: %s", e)
 
@@ -330,6 +328,99 @@ def phash_distance(a: str, b: str, logger: logging.Logger) -> int:
         if logger:
             logger.debug("Perceptual hash comparison failed for %s vs %s: %s", a, b, e)
         return 9999
+
+
+def hist_bhattacharyya(path_a: str, path_b: str, logger: Optional[logging.Logger] = None) -> float:
+    """Compute a Bhattacharyya-like distance between color histograms of two images.
+
+    Returns a float in [0,1] where smaller means more similar. On error returns 1.0.
+    """
+    try:
+        a = Image.open(path_a).convert("RGBA")
+        b = Image.open(path_b).convert("RGBA")
+        ha = a.histogram()
+        hb = b.histogram()
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+        if np is None:
+            s = sum((abs(x - y) for x, y in zip(ha, hb)))
+            return float(s) / (sum(ha) + 1)
+        ha = np.array(ha, dtype=np.float64)
+        hb = np.array(hb, dtype=np.float64)
+        ha /= ha.sum() + 1e-12
+        hb /= hb.sum() + 1e-12
+        bc = np.sum(np.sqrt(ha * hb))
+        return 1.0 - float(bc)
+    except Exception as e:
+        if logger:
+            logger.debug("hist_bhattacharyya failed for %s vs %s: %s", path_a, path_b, e)
+        return 1.0
+
+
+def multi_hashes_close(a_path: str, b_path: str, logger: Optional[logging.Logger] = None) -> bool:
+    """Compare multiple perceptual hashes (phash, dhash, average_hash).
+
+    Returns True if hashes indicate a close match under stricter thresholds.
+    """
+    try:
+        ph = imagehash.phash(Image.open(a_path)) - imagehash.phash(Image.open(b_path))
+        dh = imagehash.dhash(Image.open(a_path)) - imagehash.dhash(Image.open(b_path))
+        ah = imagehash.average_hash(Image.open(a_path)) - imagehash.average_hash(Image.open(b_path))
+        if ph <= 4 and (dh <= 4 or ah <= 4):
+            if logger:
+                logger.debug("multi-hash pass ph=%s dh=%s ah=%s for %s vs %s", ph, dh, ah, a_path, b_path)
+            return True
+    except Exception as e:
+        if logger:
+            logger.debug("multi_hashes_close failed: %s", e)
+    return False
+
+
+def ssim_similar(a_path: str, b_path: str, logger: Optional[logging.Logger] = None) -> Optional[float]:
+    """Compute SSIM between two grayscale images if possible.
+
+    Returns SSIM score in [0,1] or None if unavailable or images differ in size.
+    """        
+    try:
+        a = Image.open(a_path).convert("L")
+        b = Image.open(b_path).convert("L")
+        if a.size != b.size:
+            return None
+        aa = np.array(a, dtype=np.uint8)
+        bb = np.array(b, dtype=np.uint8)
+        score = float(ssim(aa, bb))
+        return score
+    except Exception as e:
+        if logger:
+            logger.debug("SSIM compare failed: %s", e)
+        return None
+
+
+def orb_feature_match(a_path: str, b_path: str, logger: Optional[logging.Logger] = None) -> int:
+    """Return number of good ORB matches between two images (requires OpenCV)."""
+    try:
+        img1 = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
+        img2 = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
+        if img1 is None or img2 is None:
+            return 0
+        orb = cv2.ORB_create(2000)
+        kp1, des1 = orb.detectAndCompute(img1, None)
+        kp2, des2 = orb.detectAndCompute(img2, None)
+        if des1 is None or des2 is None:
+            return 0
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        matches = bf.knnMatch(des1, des2, k=2)
+        good = []
+        for m, n in matches:
+            if m.distance < 0.75 * n.distance:
+                good.append(m)
+        return len(good)
+    except Exception as e:
+        if logger:
+            logger.debug("ORB matching failed: %s", e)
+        return 0
 
 
 def vision_compare_images(
@@ -385,7 +476,7 @@ def find_matching_png(
 
     Matching strategy:
     - Exact MD5 match
-    - Perceptual hash (phash) distance (threshold <= 31)
+    - Perceptual hash (phash) distance (threshold <= 5)
     - Ollama visual comparison as a last resort
 
     Returns the path to the matched PNG, or None if no match found.
@@ -396,9 +487,9 @@ def find_matching_png(
     except Exception:
         src_md5 = None
 
-    # Iterate once over png_paths and run checks in order: MD5 -> phash -> Ollama
+    # Iterate candidates: cheap -> expensive -> Ollama fallback
     for p in png_paths:
-        # MD5 exact match
+        # 1) MD5 exact match (very fast)
         try:
             if src_md5 is not None and src_md5 == md5_file(p):
                 if logger:
@@ -407,18 +498,59 @@ def find_matching_png(
         except Exception:
             pass
 
-        # Perceptual hash (phash) distance
+        # 2) Quick file-size check (fast) - reject if sizes wildly different
         try:
-            d = phash_distance(abs_candidate, p, logger)
-            # threshold: accept small distances (tunable)
-            if d <= 31:
+            a_size = os.path.getsize(abs_candidate)
+            b_size = os.path.getsize(p)
+            if a_size == b_size:
+                # same file size is a good hint; continue to hash checks
                 if logger:
-                    logger.debug("phash match (dist=%s): %s ~= %s", d, abs_candidate, p)
+                    logger.debug("Filesize equal hint for %s and %s", abs_candidate, p)
+        except Exception:
+            a_size = b_size = None
+
+        # 3) Perceptual/hash checks (fast)
+        try:
+            if multi_hashes_close(abs_candidate, p):
+                if logger:
+                    logger.debug("Perceptual multi-hash match: %s ~= %s", abs_candidate, p)
                 return p
         except Exception:
             pass
 
-        # Ollama visual comparison as a last resort for this candidate
+        # 4) Color histogram/Bhattacharyya (medium)
+        try:
+            hdist = hist_bhattacharyya(abs_candidate, p)
+            # stricter threshold: accept only very close histograms
+            if hdist <= 0.12:
+                if logger:
+                    logger.debug("Histogram BH dist=%.3f for %s vs %s", hdist, abs_candidate, p)
+                return p
+        except Exception:
+            pass
+
+        # 5) SSIM (more expensive) - requires same dimensions
+        try:
+            s = ssim_similar(abs_candidate, p)
+            if s is not None and s >= 0.95:
+                if logger:
+                    logger.debug("SSIM=%.3f match for %s vs %s", s, abs_candidate, p)
+                return p
+        except Exception:
+            pass
+
+        # 6) ORB keypoint matching (expensive)
+        try:
+            good = orb_feature_match(abs_candidate, p)
+            # stricter acceptance: require at least 12 good matches
+            if good >= 12:
+                if logger:
+                    logger.debug("ORB good matches=%d for %s vs %s", good, abs_candidate, p)
+                return p
+        except Exception:
+            pass
+
+        # 7) Ollama visual comparison as last resort
         try:
             if (
                 vision_service
@@ -438,7 +570,7 @@ def find_matching_png(
                 return p
         except Exception:
             pass
-
+        
     return None
 
 
@@ -518,8 +650,8 @@ if __name__ == "__main__":
 
     convert_pdf_to_markdown(
         # "/Claude/pdf2foundry_input/Skull Wizards of the Chaos Caverns.pdf",
-        "/Claude/pdf2foundry_input/Swords & Wizardry - Black Box Books - Tome 1 - Astronauts and Ancients.pdf",
-        # "/Claude/pdf2foundry_input/5f-discover-lands-unknown-parts-replacement.pdf",
+        # "/Claude/pdf2foundry_input/Swords & Wizardry - Black Box Books - Tome 1 - Astronauts and Ancients.pdf",
+        "/Claude/pdf2foundry_input/5f-discover-lands-unknown-parts-replacement.pdf",
         # "/Claude/pdf2foundry_input/StarsWithoutNumber-SkywardSteel.pdf",
         "/Claude/pdf2foundry_output/",
         llm_service,
