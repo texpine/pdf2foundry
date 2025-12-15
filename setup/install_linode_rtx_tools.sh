@@ -17,6 +17,7 @@ sudo miniconda3/envs/pdf/bin/pip install marker-pdf[all] &&
 conda install -y -n pdf pytesseract &&
 conda install -y -n pdf psutil &&
 sudo miniconda3/envs/pdf/bin/pip install poppler-utils &&
+sudo miniconda3/envs/pdf/bin/pip install PyMuPDF &&
 sudo miniconda3/envs/pdf/bin/pip install ollama &&
 conda install -y -n pdf pillow &&
 conda install -y -n pdf imagehash &&

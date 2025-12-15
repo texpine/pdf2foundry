@@ -1,24 +1,63 @@
+import base64
+import binascii
 import glob
 import hashlib
+import importlib
+import io
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
 from typing import List, Optional
 
+import fitz
 import imagehash
 import ollama
+import poppler
+from marker.config.parser import ConfigParser
+from marker.converters.pdf import PdfConverter
+from marker.models import create_model_dict
+from marker.output import text_from_rendered
 from PIL import Image
+
+
+def is_debugging() -> bool:
+    """Check if the script is running under a debugger.
+
+    Checks multiple indicators:
+    - sys.gettrace() for trace-based debuggers
+    - PYTHONBREAKPOINT environment variable
+    - Common debugger modules in sys.modules
+    """
+    # Check if trace function is set (pdb, debugpy, etc.)
+    if sys.gettrace() is not None:
+        return True
+
+    # Check for debugger environment variables
+    if os.environ.get("PYTHONBREAKPOINT", "") not in ("", "0"):
+        return True
+
+    # Check if running under common debuggers
+    debugger_modules = {"pydevd", "debugpy", "pdb"}
+    if debugger_modules & set(sys.modules.keys()):
+        return True
+
+    return False
 
 
 def run_marker_single(
     pdf_path: str,
     output_dir: str,
-    llm_service: str,
-    llm_model_name: str,
-    llm_api_or_url: str,
     logger: logging.Logger,
+    llm_service: Optional[str] = None,
+    llm_model_name: Optional[str] = None,
+    llm_api_or_url: Optional[str] = None,
+    vision_service: Optional[str] = None,
+    vision_model_name: Optional[str] = None,
+    vision_api_or_url: Optional[str] = None,
 ) -> Optional[str]:
     """Run the `marker_single` CLI to convert a PDF to markdown.
 
@@ -29,38 +68,181 @@ def run_marker_single(
     md_filename = md_name + ".md"
     output_filepath = os.path.join(output_dir, md_name, md_filename)
 
-    marker_cmd = [
-        "marker_single",
-        pdf_path,
-        "--output_format",
-        "markdown",
-        "--output_dir",
-        output_dir,
-        "--use_llm",
-        "--llm_service",
-        llm_service,
-        "--ollama_model",
-        llm_model_name,
-        "--ollama_base_url",
-        llm_api_or_url,
-        "--paginate_output",
-        "--workers",
-        "4",
-    ]
+    config = {
+        "output_format": "markdown",
+        "paginate_output": True,
+    }
+
+    if llm_service is not None:
+        config["use_llm"] = True
+        config["llm_service"] = llm_service
+        config["ollama_model"] = llm_model_name
+        config["ollama_base_url"] = llm_api_or_url
+    else:
+        config["use_llm"] = False
 
     try:
-        logger.info("Running marker_single CLI to generate markdown...")
-        res = subprocess.run(marker_cmd, capture_output=True, text=True, check=True)
-        logger.info("marker_single finished: %s", (res.stdout or res.stderr)[:200])
-    except subprocess.CalledProcessError as e:
-        logger.error("marker_single failed: %s", e.stderr or e.stdout)
-        print("Error: marker_single CLI failed. See log for details.")
+        logger.info("Running Marker conversion to generate markdown...")
+        config_parser = ConfigParser(config)
+        converter = PdfConverter(
+            config=config_parser.generate_config_dict(),
+            artifact_dict=create_model_dict(),
+            processor_list=config_parser.get_processors(),
+            renderer=config_parser.get_renderer(),
+            llm_service=config_parser.get_llm_service(),
+        )
+        rendered = converter(pdf_path)
+        md_text, _, images = text_from_rendered(rendered)
+        logger.info("Marker conversion finished")
+    except Exception as e:
+        logger.error("Marker conversion failed: %s", e)
+        print("Error: Marker conversion failed. See log for details.")
         return None
 
-    if not os.path.exists(output_filepath):
-        logger.error("Expected markdown not found at %s", output_filepath)
-        print(f"Conversion completed but markdown not found: {output_filepath}")
-        return None
+    # Create output directory
+    md_dir = os.path.dirname(output_filepath)
+    os.makedirs(md_dir, exist_ok=True)
+
+    def path_relative_to_md(abs_path: str):
+        return os.path.relpath(abs_path, start=md_dir).replace(os.path.sep, "/")
+
+    # Save markdown
+    with open(output_filepath, "w", encoding="utf-8") as f:
+        f.write(md_text)
+    # Prepare images directory
+    images_dir = os.path.join(md_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+    # Extract images using run_pdfimages_into_dir
+    better_png_paths = run_pdfimages_into_dir(pdf_path, images_dir, logger)
+    # Create images_replaced directory
+    images_replaced_dir = os.path.join(md_dir, "images_replaced/")
+    os.makedirs(images_replaced_dir, exist_ok=True)
+    # Create a mapping of original RELATIVE image paths to better RELATIVE PNG paths, or to RELATIVE storage dir
+    relative_paths_mapping = {}
+    # Save images (accept multiple possible formats returned by Marker)
+    for rel_path, img_obj in images.items():
+        img_path = os.path.join(md_dir, rel_path)
+        os.makedirs(os.path.dirname(img_path), exist_ok=True)
+        try:
+            # base64 encoded string
+            if isinstance(img_obj, str):
+                try:
+                    data = base64.b64decode(img_obj)
+                    with open(img_path, "wb") as f:
+                        f.write(data)
+                except (binascii.Error, TypeError):
+                    logger.warning(
+                        "Image for %s is a string but not base64 encoded; skipping",
+                        rel_path,
+                    )
+
+            # raw bytes-like
+            elif isinstance(img_obj, (bytes, bytearray)):
+                with open(img_path, "wb") as f:
+                    f.write(img_obj)
+
+            # memoryview
+            elif isinstance(img_obj, memoryview):
+                with open(img_path, "wb") as f:
+                    f.write(img_obj.tobytes())
+
+            # PIL Image object
+            elif isinstance(img_obj, Image.Image):
+                # infer format from extension if possible
+                ext = os.path.splitext(rel_path)[1].lstrip(".").upper() or "PNG"
+                try:
+                    img_obj.save(img_path, format=ext)
+                except Exception:
+                    img_obj.save(img_path)
+
+            else:
+                # fallback: try to base64-decode whatever it is
+                try:
+                    data = base64.b64decode(img_obj)
+                    with open(img_path, "wb") as f:
+                        f.write(data)
+                except Exception:
+                    logger.warning(
+                        "Unrecognized image data type for %s; skipping", rel_path
+                    )
+
+            # Find best matching PNG using helper (MD5 -> phash -> Ollama)
+            matched_png = find_matching_png(
+                img_path,
+                better_png_paths,
+                logger,
+                vision_service,
+                vision_model_name,
+                vision_api_or_url,
+            )
+            img_path_basename = os.path.basename(img_path)
+            if matched_png:
+                matched_png_basename = os.path.basename(matched_png)
+                matched_png_basename_no_ext = os.path.splitext(matched_png_basename)[0]
+                # Create directory for replaced images
+                move_to_dir = os.path.join(
+                    images_replaced_dir, f"{matched_png_basename_no_ext}"
+                )
+                os.makedirs(move_to_dir, exist_ok=True)
+                # Move original image to images_replaced/<better png file name>/
+                img_path_after_replaced = os.path.join(move_to_dir, img_path_basename)
+                try:
+                    shutil.move(img_path, img_path_after_replaced)
+                    # Add to mapping
+                    # get relative path to the markdown file's folder
+                    # normalize path to forward slashes (good for Markdown and cross-platform)
+                    relative_paths_mapping[rel_path] = path_relative_to_md(matched_png)
+                    logger.info(
+                        "Moved replaced image %s to %s", img_path_basename, move_to_dir
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to move original image %s to images_replaced: %s",
+                        img_path,
+                        e,
+                    )
+            else:
+                # No match found: keep original behavior and move into images/ because the original files are created in the same folder of the .md
+                # dest_name = os.path.basename(img_path)
+                dest_path = os.path.join(images_dir, img_path_basename)
+                try:
+                    shutil.move(img_path, dest_path)
+                    # Add to mapping
+                    relative_paths_mapping[rel_path] = path_relative_to_md(dest_path)
+                    logger.info(
+                        "Moved unmatched image %s to images/", img_path_basename
+                    )
+                except Exception as e:
+                    logger.warning("Could not move image %s: %s", img_path_basename, e)
+
+        except Exception as e:
+            logger.warning("Failed to save image %s: %s", rel_path, e)
+
+    # Update all markdown references in a single pass
+    for old_rel_path, new_rel_path in relative_paths_mapping.items():
+        # img_pattern_md = re.compile(r"!\[[^\]]*\]\(([^)]+)\)"
+        img_pattern_md = re.compile(
+            rf"!\[(?=[^\]]*{old_rel_path}[^\]]*\]|[^\]]*\]\([^)]*{old_rel_path})([^\]]*)\]\(([^)]+)\)"
+        )
+        # img_pattern_html = re.compile(r"<img\s+[^>]*src=[\"']([^\"']+)[\"'][^>]*>")
+        img_pattern_html = re.compile(
+            rf"<img\s+(?=[^>]*{old_rel_path})[^>]*src=[\"']([^\"']+)[\"'][^>]*>"
+        )
+        # Collect all references to this image in the markdown
+        image_refs = list(img_pattern_md.finditer(md_text)) + list(
+            img_pattern_html.finditer(md_text)
+        )
+        # final replacement of image reference in the MD code
+        for match in image_refs:
+            img_ref = match.group(0)
+            md_text = md_text.replace(
+                img_ref, f"![[{new_rel_path}]]"
+            )  # markdown links that work in Obsidian
+            logger.info("Replaced image reference %s with %s", img_ref, new_rel_path)
+
+    # Save updated markdown
+    with open(output_filepath, "w", encoding="utf-8") as f:
+        f.write(md_text)
 
     return output_filepath
 
@@ -72,23 +254,60 @@ def run_pdfimages_into_dir(
 
     If extraction fails or no images were created, returns an empty list.
     """
-    pdfimages_cmd = ["pdfimages", pdf_path, images_dir, "-png"]
+    # Prefer using PyMuPDF (fitz) to extract embedded images (preserves PNG alpha).
+    # Try PyMuPDF (fast, preserves embedded PNGs and alpha channels)
+    created = []
     try:
-        logger.info("Extracting images with pdfimages into %s...", images_dir)
-        res = subprocess.run(pdfimages_cmd, capture_output=True, text=True, check=True)
-        logger.info("pdfimages finished: %s", (res.stdout or res.stderr)[:200])
-    except subprocess.CalledProcessError as e:
-        logger.error("pdfimages failed: %s", e.stderr or e.stdout)
-        print(
-            "Warning: pdfimages failed to extract images. Continuing, but images may be missing."
-        )
-        return []
+        logger.info("Attempting to extract images via PyMuPDF...")
+        doc = fitz.open(pdf_path)
+        for pno in range(len(doc)):
+            # get_page_images returns tuples; first element is xref
+            try:
+                images = doc.get_page_images(pno, full=True)
+            except Exception:
+                images = doc.get_page_images(pno)
 
-    # Collect any PNGs created using the provided prefix/directory
-    pattern = os.path.join(images_dir + "*")
-    created = [
-        os.path.basename(p) for p in glob.glob(pattern) if p.lower().endswith(".png")
-    ]
+            for img in images:
+                xref = img[0]
+                try:
+                    image_dict = doc.extract_image(xref)
+                    img_bytes = image_dict.get("image")
+                    ext = image_dict.get("ext", "png")
+                    out_basename = f"p{pno}_img{xref}.{ext}"
+                    out_path = os.path.join(images_dir, out_basename)
+                    os.makedirs(images_dir, exist_ok=True)
+                    if img_bytes is None:
+                        logger.debug("No image bytes for xref %s on page %s", xref, pno)
+                        continue
+                    if ext.lower() == "png":
+                        with open(out_path, "wb") as fh:
+                            fh.write(img_bytes)
+                    else:
+                        # convert other formats to PNG to keep consistent output
+                        try:
+                            im = Image.open(io.BytesIO(img_bytes))
+                            png_basename = os.path.splitext(out_basename)[0] + ".png"
+                            out_png = os.path.join(images_dir, png_basename)
+                            im.save(out_png, "PNG")
+                            out_basename = png_basename
+                            out_path = out_png
+                        except Exception:
+                            # as a last resort write raw bytes with original ext
+                            with open(out_path, "wb") as fh:
+                                fh.write(img_bytes)
+
+                    created.append(out_path)
+                except Exception as e:
+                    logger.debug("PyMuPDF failed for page %s xref %s: %s", pno, xref, e)
+
+        doc.close()
+        if created:
+            logger.info("PyMuPDF extracted %d images", len(created))
+            return created
+        logger.debug("PyMuPDF found no images to extract")
+    except Exception as e:
+        logger.debug("PyMuPDF extraction failed or not available: %s", e)
+
     return created
 
 
@@ -113,11 +332,21 @@ def phash_distance(a: str, b: str, logger: logging.Logger) -> int:
         return 9999
 
 
-def ollama_compare_images(img_a: str, img_b: str, logger: logging.Logger) -> bool:
+def vision_compare_images(
+    img_a: str,
+    img_b: str,
+    logger: logging.Logger,
+    vision_service: str,
+    vision_model_name: str,
+    vision_api_or_url: str,
+) -> bool:
     """Use ollama llava:34b to compare two images.
     Returns True if images are visually similar, False otherwise.
     Requires ollama to be running locally.
     """
+    if vision_service != "Ollama":  # only ollama supported so far
+        return False
+
     try:
         import base64
 
@@ -127,8 +356,11 @@ def ollama_compare_images(img_a: str, img_b: str, logger: logging.Logger) -> boo
             img_b_b64 = base64.b64encode(f.read()).decode("utf-8")
 
         prompt = "Are these two images showing the same content or very similar content? Answer only 'yes' or 'no'."
-        response = ollama.generate(
-            model="llava:34b",
+        client = ollama.Client(
+            host=vision_api_or_url,  # Change this if using a different host
+        )
+        response = client.generate(
+            model=vision_model_name,
             prompt=prompt,
             images=[img_a_b64, img_b_b64],
             stream=False,
@@ -142,13 +374,18 @@ def ollama_compare_images(img_a: str, img_b: str, logger: logging.Logger) -> boo
 
 
 def find_matching_png(
-    abs_candidate: str, png_paths: List[str], logger: logging.Logger
+    abs_candidate: str,
+    png_paths: List[str],
+    logger: logging.Logger,
+    vision_service: Optional[str] = None,
+    vision_model_name: Optional[str] = None,
+    vision_api_or_url: Optional[str] = None,
 ) -> Optional[str]:
     """Find a matching PNG for `abs_candidate` from `png_paths`.
 
     Matching strategy:
     - Exact MD5 match
-    - Perceptual hash (phash) distance (threshold <= 5)
+    - Perceptual hash (phash) distance (threshold <= 31)
     - Ollama visual comparison as a last resort
 
     Returns the path to the matched PNG, or None if no match found.
@@ -174,7 +411,7 @@ def find_matching_png(
         try:
             d = phash_distance(abs_candidate, p, logger)
             # threshold: accept small distances (tunable)
-            if d <= 5:
+            if d <= 31:
                 if logger:
                     logger.debug("phash match (dist=%s): %s ~= %s", d, abs_candidate, p)
                 return p
@@ -183,7 +420,19 @@ def find_matching_png(
 
         # Ollama visual comparison as a last resort for this candidate
         try:
-            if ollama_compare_images(abs_candidate, p, logger):
+            if (
+                vision_service
+                and vision_model_name
+                and vision_api_or_url
+                and vision_compare_images(
+                    abs_candidate,
+                    p,
+                    logger,
+                    vision_service,
+                    vision_model_name,
+                    vision_api_or_url,
+                )
+            ):
                 if logger:
                     logger.debug("Ollama visual match: %s ~= %s", abs_candidate, p)
                 return p
@@ -193,90 +442,15 @@ def find_matching_png(
     return None
 
 
-def rewrite_markdown_image_references(
-    md_text: str,
-    output_dir: str,
-    images_dir: str,
-    png_paths: List[str],
-    logger: logging.Logger,
-) -> str:
-    """Process markdown image references: match with PNGs, move originals, update references.
-
-    Args:
-        md_text: The markdown content.
-        output_dir: The base output directory.
-        images_dir: The directory where PNGs are stored.
-        png_paths: List of full paths to PNG files.
-        logger: Logger for debug output.
-
-    Returns:
-        Updated markdown text with corrected image references.
-    """
-    # Find image references of the forms: ![alt](path) and <img src="path">
-    img_pattern_md = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
-    img_pattern_html = re.compile(r"<img\s+[^>]*src=[\"']([^\"']+)[\"'][^>]*>")
-
-    def normalize_path(p):
-        # Remove leading ./ or / and normalize separators
-        return p.lstrip("./\\")
-
-    # Create images_replaced directory
-    images_replaced_dir = os.path.join(output_dir, "images_replaced")
-    os.makedirs(images_replaced_dir, exist_ok=True)
-
-    # Process all image references
-    for match in list(img_pattern_md.finditer(md_text)) + list(
-        img_pattern_html.finditer(md_text)
-    ):
-        img_ref = match.group(1)
-        norm = normalize_path(img_ref)
-        abs_candidate = os.path.join(output_dir, norm)
-        if not os.path.exists(abs_candidate):
-            continue
-
-        # Find best matching PNG using helper (MD5 -> phash -> Ollama)
-        matched_png = find_matching_png(abs_candidate, png_paths, logger)
-
-        if matched_png:
-            # Move original to images_replaced/ with "_replaced" suffix
-            png_basename_no_ext = os.path.splitext(os.path.basename(matched_png))[0]
-            orig_basename = os.path.basename(norm)
-            orig_ext = os.path.splitext(orig_basename)[1]
-
-            renamed_file = f"{png_basename_no_ext}_replaced{orig_ext}"
-            dest_orig = os.path.join(images_replaced_dir, renamed_file)
-            try:
-                shutil.move(abs_candidate, dest_orig)
-                logger.info("Moved replaced image %s to %s", abs_candidate, dest_orig)
-            except Exception as e:
-                logger.warning(
-                    "Failed to move original image %s to images_replaced: %s",
-                    abs_candidate,
-                    e,
-                )
-
-            # Update markdown reference to use the PNG
-            png_basename = os.path.basename(matched_png)
-            new_ref = os.path.join("images", png_basename).replace("\\", "/")
-            md_text = md_text.replace(img_ref, new_ref)
-            logger.info("Replaced image reference %s with %s", img_ref, new_ref)
-        else:
-            # No match found: keep original behavior (move into images/)
-            dest_name = os.path.basename(norm)
-            dest_path = os.path.join(images_dir, dest_name)
-            try:
-                shutil.move(abs_candidate, dest_path)
-                new_ref = os.path.join("images", dest_name).replace("\\", "/")
-                md_text = md_text.replace(img_ref, new_ref)
-                logger.info("Moved unmatched image %s to images/", abs_candidate)
-            except Exception as e:
-                logger.warning("Could not move image %s: %s", abs_candidate, e)
-
-    return md_text
-
-
 def convert_pdf_to_markdown(
-    pdf_path, output_dir, llm_service, llm_model_name, llm_api_or_url
+    pdf_path,
+    output_dir,
+    llm_service: Optional[str] = None,
+    llm_model_name: Optional[str] = None,
+    llm_api_or_url: Optional[str] = None,
+    vision_service: Optional[str] = None,
+    vision_model_name: Optional[str] = None,
+    vision_api_or_url: Optional[str] = None,
 ):
     """
     Converts a PDF file to Markdown using Marker.
@@ -284,10 +458,13 @@ def convert_pdf_to_markdown(
     Args:
         pdf_path (str): The path to the input PDF file.
         output_dir (str): The directory to save the output Markdown file.
-        llm_service (str): The LLM service class path.
-        llm_model_name (str): The model name to use.
-        llm_api_or_url (str): The API endpoint or URL.
+        llm_service (Optional[str]): The LLM service class path. If None, no LLM is used.
+        llm_model_name (Optional[str]): The model name to use. Ignored if llm_service is None.
+        llm_api_or_url (Optional[str]): The API endpoint or URL. Ignored if llm_service is None.
     """
+    # script_dir = os.path.dirname(os.path.abspath(__file__))
+    # pdf_path = os.path.abspath(os.path.join(script_dir, pdf_path))
+    # output_dir = os.path.abspath(os.path.join(script_dir, output_dir))
     if not os.path.exists(pdf_path):
         print(f"Error: PDF file not found at {pdf_path}")
         return
@@ -308,56 +485,47 @@ def convert_pdf_to_markdown(
 
     # Run marker_single via helper function; returns the markdown filepath or None
     output_filepath = run_marker_single(
-        pdf_path, output_dir, llm_service, llm_model_name, llm_api_or_url, logger
+        pdf_path,
+        output_dir,
+        logger,
+        llm_service,
+        llm_model_name,
+        llm_api_or_url,
+        vision_service,
+        vision_model_name,
+        vision_api_or_url,
     )
-
-    if not output_filepath:
-        # Error already logged in helper
-        return
-
-    # Prepare images directory
-    images_dir = os.path.join(output_dir, "images")
-    os.makedirs(images_dir, exist_ok=True)
-
-    # Extract images using helper; returns list of created PNG base names (or empty list)
-    image_files = run_pdfimages_into_dir(pdf_path, images_dir, logger)
-
-    # Fallback: if pdfimages didn't create anything, look for any PNGs directly in output_dir
-    if not image_files:
-        image_files = [
-            os.path.basename(p) for p in glob.glob(os.path.join(output_dir, "*.png"))
-        ]
-
-    # Load markdown
-    with open(output_filepath, "r", encoding="utf-8") as f:
-        md_text = f.read()
-
-    # Build list of PNG paths
-    png_paths = [os.path.join(images_dir, n) for n in image_files]
-
-    # Rewrite image references using helper
-    md_text = rewrite_markdown_image_references(
-        md_text, output_dir, images_dir, png_paths, logger
-    )
-
-    # Save markdown
-    try:
-        with open(output_filepath, "w", encoding="utf-8") as f:
-            f.write(md_text)
-        logger.info("Saved updated markdown to %s", output_filepath)
-    except Exception as e:
-        logger.error("Failed to save updated markdown: %s", e)
-        print(f"Error: could not save updated markdown file: {e}")
-        return
 
     print(f"Successfully converted '{pdf_path}' to '{output_filepath}'")
 
 
 if __name__ == "__main__":
+    # only use AI in debug mode when on Linux
+    if is_debugging() and platform.system() == "Linux":
+        llm_service = "Ollama"
+        llm_model_name = "gpt-oss:120b"
+        llm_api_or_url = "http://localhost:11434"
+        vision_service = "Ollama"
+        vision_model_name = "llava:34b"
+        vision_api_or_url = "http://localhost:11434"
+    else:
+        llm_service = None
+        llm_model_name = None
+        llm_api_or_url = None
+        vision_service = None
+        vision_model_name = None
+        vision_api_or_url = None
+
     convert_pdf_to_markdown(
-        "../pdf2foundry_input/Skull Wizards of the Chaos Caverns.pdf",
-        "../pdf2foundry_output/",
-        "marker.services.ollama.OllamaService",
-        "gpt-oss:120b",
-        "http://localhost:11434",
+        # "/Claude/pdf2foundry_input/Skull Wizards of the Chaos Caverns.pdf",
+        "/Claude/pdf2foundry_input/Swords & Wizardry - Black Box Books - Tome 1 - Astronauts and Ancients.pdf",
+        # "/Claude/pdf2foundry_input/5f-discover-lands-unknown-parts-replacement.pdf",
+        # "/Claude/pdf2foundry_input/StarsWithoutNumber-SkywardSteel.pdf",
+        "/Claude/pdf2foundry_output/",
+        llm_service,
+        llm_model_name,
+        llm_api_or_url,
+        vision_service,
+        vision_model_name,
+        vision_api_or_url,
     )

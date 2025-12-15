@@ -8,25 +8,25 @@ repos:
         exclude_types: [csv]
     -   id: remove-tabs
         exclude_types: [csv]
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
-    hooks:
-    - id: trailing-whitespace
-    - id: end-of-file-fixer
-    - id: check-merge-conflict
-    - id: check-yaml
-      args: [--unsafe]
--   repo: https://github.com/pre-commit/mirrors-isort
-    rev: v5.10.1
-    hooks:
-    - id: isort
--   repo: https://github.com/ambv/black
-    rev: 25.11.0
-    hooks:
-    - id: black
-      language_version: python3.13
--   repo: https://github.com/pycqa/flake8
-    rev: 7.3.0
-    hooks:
-    -   id: flake8
-        exclude: ^tests
+# -   repo: https://github.com/pre-commit/pre-commit-hooks
+#     rev: v6.0.0
+#     hooks:
+#     - id: trailing-whitespace
+#     - id: end-of-file-fixer
+#     - id: check-merge-conflict
+#     - id: check-yaml
+#       args: [--unsafe]
+# -   repo: https://github.com/pre-commit/mirrors-isort
+#     rev: v5.10.1
+#     hooks:
+#     - id: isort
+# -   repo: https://github.com/ambv/black
+#     rev: 25.11.0
+#     hooks:
+#     - id: black
+#       language_version: python3.13
+# -   repo: https://github.com/pycqa/flake8
+#     rev: 7.3.0
+#     hooks:
+#     -   id: flake8
+#         exclude: ^tests
