@@ -651,8 +651,8 @@ if __name__ == "__main__":
     convert_pdf_to_markdown(
         # "/Claude/pdf2foundry_input/Skull Wizards of the Chaos Caverns.pdf",
         # "/Claude/pdf2foundry_input/Swords & Wizardry - Black Box Books - Tome 1 - Astronauts and Ancients.pdf",
-        "/Claude/pdf2foundry_input/5f-discover-lands-unknown-parts-replacement.pdf",
-        # "/Claude/pdf2foundry_input/StarsWithoutNumber-SkywardSteel.pdf",
+        # "/Claude/pdf2foundry_input/5f-discover-lands-unknown-parts-replacement.pdf",
+        "/Claude/pdf2foundry_input/StarsWithoutNumber-SkywardSteel.pdf",
         "/Claude/pdf2foundry_output/",
         llm_service,
         llm_model_name,
